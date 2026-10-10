@@ -1,4 +1,6 @@
+#include <cmath>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -10,59 +12,157 @@ const int FPS_LIMIT = 30;
 
 using Point2D = sf::Vector2f;
 
-// TODO: (Part 1) Define a function that samples a cubic Bezier curve at t in [0, 1].
-Point2D getPoint(const std::vector<sf::Vector2f>& pts, float t) { return Point2D{}; }
+// These functions sample one cubic segment, using its four control points.
+Point2D getPoint(const std::vector<sf::Vector2f>& pts, float t) {
+    const float u = 1.f - t;
+    return u * u * u * pts.at(0) + 3.f * u * u * t * pts.at(1) +
+           3.f * u * t * t * pts.at(2) + t * t * t * pts.at(3);
+}
 
-// TODO: (Part 2) Define a function that returns the curve's slope at t in [0, 1].
-Point2D getSlope(const std::vector<sf::Vector2f>& pts, float t) { return Point2D{}; }
+// Return the derivative vector.
+Point2D getSlope(const std::vector<sf::Vector2f>& pts, float t) {
+    const float u = 1.f - t;
+    return 3.f * u * u * (pts.at(1) - pts.at(0)) +
+           6.f * u * t * (pts.at(2) - pts.at(1)) +
+           3.f * t * t * (pts.at(3) - pts.at(2));
+}
 
-// TODO: (Part 1) Store four control points for the curve.
-// TODO: (Part 2) Track animation time for the square moving along the curve.
-// TODO: (Part 3) Track the index of the control point being dragged.
+// Connected segments share every third point: [0,1,2,3], [3,4,5,6], ...
+std::vector<Point2D> points{{100.f, 600.f}, {200.f, 150.f}, {500.f, 150.f}, {600.f, 500.f}};
+float animationTime = 0.f;
+int draggedPoint = -1;
 
-void handleInput(sf::Window& window, bool& shouldQuit) {
+float lengthSquared(Point2D vector) { return vector.x * vector.x + vector.y * vector.y; }
+
+// Rotate the opposite handle onto the same tangent, preserving its length.
+void alignHandle(std::size_t anchor, std::size_t moved, std::size_t opposite) {
+    const Point2D direction = points[anchor] - points[moved];
+    const float magnitude = std::sqrt(lengthSquared(direction));
+    if (magnitude > 0.f) {
+        const float distance = std::sqrt(lengthSquared(points[opposite] - points[anchor]));
+        points[opposite] = points[anchor] + direction * (distance / magnitude);
+    }
+}
+
+void movePoint(std::size_t index, Point2D position) {
+    const Point2D offset = position - points[index];
+    points[index] = position;
+    if (index % 3 == 0) {
+        // Moving an endpoint translates its handles, preserving the join's tangent.
+        if (index > 0) points[index - 1] += offset;
+        if (index + 1 < points.size()) points[index + 1] += offset;
+    } else if (index % 3 == 2 && index + 2 < points.size()) {
+        alignHandle(index + 1, index, index + 2);
+    } else if (index % 3 == 1 && index > 1) {
+        alignHandle(index - 1, index, index - 2);
+    }
+}
+
+void addSegment() {
+    const Point2D endpoint = points.back();
+    Point2D direction = endpoint - points[points.size() - 2];
+    const float magnitude = std::sqrt(lengthSquared(direction));
+    direction = magnitude > 0.f ? direction / magnitude : Point2D{1.f, 0.f};
+    // The first new handle continues the previous segment's end tangent.
+    for (int i = 1; i <= 3; ++i) points.push_back(endpoint + direction * (60.f * i));
+}
+
+void removeSegment() {
+    if (points.size() > 4) {
+        points.resize(points.size() - 3);
+        if (draggedPoint >= static_cast<int>(points.size())) draggedPoint = -1;
+    }
+}
+
+void handleInput(sf::RenderWindow& window, bool& shouldQuit) {
     while (const std::optional<sf::Event> event = window.pollEvent()) {
         if (event->is<sf::Event::Closed>()) {
             window.close();
             shouldQuit = true;
         } else if (const auto* mouse = event->getIf<sf::Event::MouseButtonPressed>()) {
-            // TODO: (Part 3) On left-click, select the closest control point
-            // using mouse->position and start dragging it.
+            if (mouse->button == sf::Mouse::Button::Left) {
+                const Point2D position = window.mapPixelToCoords(mouse->position);
+                float closestDistance = std::numeric_limits<float>::max();
+                for (std::size_t i = 0; i < points.size(); ++i) {
+                    const float distance = lengthSquared(points[i] - position);
+                    if (distance < closestDistance) {
+                        closestDistance = distance;
+                        draggedPoint = static_cast<int>(i);
+                    }
+                }
+                movePoint(static_cast<std::size_t>(draggedPoint), position);
+            }
         } else if (const auto* mouse = event->getIf<sf::Event::MouseButtonReleased>()) {
-            // TODO: (Part 3) On left-button release, stop dragging.
+            if (mouse->button == sf::Mouse::Button::Left) {
+                if (draggedPoint >= 0) {
+                    movePoint(static_cast<std::size_t>(draggedPoint),
+                              window.mapPixelToCoords(mouse->position));
+                }
+                draggedPoint = -1;
+            }
         } else if (const auto* mouse = event->getIf<sf::Event::MouseMoved>()) {
-            // TODO: (Part 3) Move the selected control point to mouse->position.
-            // TODO: (Part 4) Maintain matching slopes at shared endpoints.
-            // When moving point 3, move point 5 without changing its distance
-            // from point 4 (point numbers here start at 1).
+            if (draggedPoint >= 0) {
+                movePoint(static_cast<std::size_t>(draggedPoint),
+                          window.mapPixelToCoords(mouse->position));
+            }
+        } else if (event->is<sf::Event::FocusLost>()) {
+            draggedPoint = -1;
         } else if (const auto* key = event->getIf<sf::Event::KeyPressed>()) {
-            // TODO: (Part 4) '+' adds three control points; '-' removes three,
-            // keeping at least four points.
+            if (key->code == sf::Keyboard::Key::Add ||
+                (key->code == sf::Keyboard::Key::Equal && key->shift)) {
+                addSegment();
+            } else if (key->code == sf::Keyboard::Key::Subtract ||
+                       key->code == sf::Keyboard::Key::Hyphen) {
+                removeSegment();
+            }
         }
     }
 }
 
+void drawLine(sf::RenderWindow& window, Point2D start, Point2D end, sf::Color color) {
+    const sf::Vertex line[]{{start, color}, {end, color}};
+    window.draw(line, 2, sf::PrimitiveType::Lines);
+}
+
 void render(sf::RenderWindow& window) {
-    window.clear(sf::Color::Black);
-    // ====== ====== ======
-    // TODO: (Part 1) Sample GetPoint over t in [0, 1] and connect samples using the line-drawing
-    // code from your project. Draw all four control points as circles after drawing the curve.
-    // ====== ====== ======
+    window.clear(sf::Color(20, 24, 32));
+    const sf::Color handleColor(110, 120, 140);
+    constexpr int samples = 100;
+    for (std::size_t start = 0; start + 3 < points.size(); start += 3) {
+        const std::vector<Point2D> segment(points.begin() + start, points.begin() + start + 4);
+        drawLine(window, segment[0], segment[1], handleColor);
+        drawLine(window, segment[2], segment[3], handleColor);
+        Point2D previous = getPoint(segment, 0.f);
+        for (int i = 1; i <= samples; ++i) {
+            const Point2D current = getPoint(segment, static_cast<float>(i) / samples);
+            drawLine(window, previous, current, sf::Color::Cyan);
+            previous = current;
+        }
+    }
 
-    // ====== ====== ======
-    // TODO: (Part 2) Draw a small square moving repeatedly along the curve.
-    // Use GetSlope to orient it to the curve at each time step.
-    // ====== ====== ======
+    const std::size_t segmentCount = (points.size() - 1) / 3;
+    // Each segment takes three seconds; wrap after traversing the entire curve.
+    const float progress = std::fmod(animationTime / 3.f, static_cast<float>(segmentCount));
+    const std::size_t start = static_cast<std::size_t>(progress) * 3;
+    const float t = progress - std::floor(progress);
+    const std::vector<Point2D> segment(points.begin() + start, points.begin() + start + 4);
+    const Point2D slope = getSlope(segment, t);
+    sf::RectangleShape square({18.f, 18.f});
+    square.setOrigin({9.f, 9.f});
+    square.setPosition(getPoint(segment, t));
+    square.setRotation(sf::radians(std::atan2(slope.y, slope.x)));
+    square.setFillColor(sf::Color::Yellow);
+    window.draw(square);
 
-    // ====== ====== ======
-    // TODO: (Part 3) Draw control handles from point 1 to 2 and point 3 to 4.
-    // TODO: (Part 4) Draw all connected cubic Bezier segments and their handles.
-    // ====== ====== ======
-
-    // ====== ====== ======
-    // TODO: (Bonus) Support multiple curves, a Galaga screen overlay at a 1:2 ratio, and exporting
-    // curve points as C++ code for Project 1b.
-    // ====== ====== ======
+    // Draw the control points last so they remain visible above the curve and handles.
+    sf::CircleShape circle(7.f);
+    circle.setOrigin({7.f, 7.f});
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        circle.setPosition(points[i]);
+        const sf::Color color = i % 3 == 0 ? sf::Color::White : sf::Color(255, 140, 80);
+        circle.setFillColor(static_cast<int>(i) == draggedPoint ? sf::Color::Yellow : color);
+        window.draw(circle);
+    }
 
     window.display();
 }
@@ -72,18 +172,21 @@ int main() {
 
     try {
         // Initialize window
-        window.create(sf::VideoMode({WINDOW_WIDTH, WINDOW_HEIGHT}), "Bezier Curve Editor");
+        window.create(sf::VideoMode({WINDOW_WIDTH, WINDOW_HEIGHT}),
+                      "Bezier Curve Editor | Left drag: edit | + / -: add / remove segment");
         window.setFramerateLimit(FPS_LIMIT);
         // Prevent key repeats.
         window.setKeyRepeatEnabled(false);
 
         bool shouldQuit = false;
+        sf::Clock frameClock;
         // Main game loop
         while (window.isOpen()) {
             handleInput(window, shouldQuit);
             if (shouldQuit) {
                 break;
             }
+            animationTime += frameClock.restart().asSeconds();
             render(window);
         }
     } catch (const std::exception& e) {
